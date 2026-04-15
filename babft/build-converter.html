@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>BABFT .Build to Lumin JSON Converter</title>
+</head>
+<body>
+<h2>BABFT .Build to Lumin JSON Converter</h2>
+<p>Drop or select .Build files to convert to Lumin's JSON format.</p>
+
+<input type="file" id="fileInput" multiple accept=".Build">
+<br><br>
+<div id="output"></div>
+
+<script>
+const DEG2RAD = Math.PI / 180;
+
+function parseCSV3(str) {
+    const parts = str.split(",").map(s => parseFloat(s.trim()));
+    return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+
+function degreesToRadians(arr) {
+    return [arr[0] * DEG2RAD, arr[1] * DEG2RAD, arr[2] * DEG2RAD];
+}
+
+function parseBBHEncoded(text) {
+    const idx = text.indexOf("BBH_ENCODED:");
+    if (idx === -1) return null;
+
+    let jsonStart = text.indexOf("{", idx);
+    if (jsonStart === -1) return null;
+
+    const jsonStr = text.substring(jsonStart);
+    const data = JSON.parse(jsonStr);
+
+    const blocks = [];
+    const grouped = data.b || {};
+    for (const [blockType, entries] of Object.entries(grouped)) {
+        for (const entry of entries) {
+            const pos = parseCSV3(entry.p || "0,0,0");
+            const rotDeg = parseCSV3(entry.r || "0,0,0");
+            const rot = degreesToRadians(rotDeg);
+            const color = parseCSV3(entry.cl || "0.639,0.635,0.647");
+            const size = entry.sz ? parseCSV3(entry.sz) : [2, 2, 2];
+
+            const block = {
+                name: blockType,
+                size: size,
+                position: pos,
+                rotation: rot,
+                color: color,
+            };
+            blocks.push(block);
+        }
+    }
+    return blocks;
+}
+
+function parseOldBBH(text) {
+    const data = JSON.parse(text);
+    if (!Array.isArray(data) || data.length < 2) return null;
+
+    const grouped = data[1];
+    const blocks = [];
+
+    for (const [blockType, entries] of Object.entries(grouped)) {
+        for (const entry of entries) {
+            const pos = parseCSV3(entry.Position || "0,0,0");
+            const rotDeg = parseCSV3(entry.Rotation || "0,0,0");
+            const rot = degreesToRadians(rotDeg);
+            const colorStr = entry.Color || "0.639, 0.635, 0.647";
+            const color = parseCSV3(colorStr);
+            const size = entry.Size ? parseCSV3(entry.Size) : [2, 2, 2];
+
+            const block = {
+                name: blockType,
+                size: size,
+                position: pos,
+                rotation: rot,
+                color: color,
+            };
+            blocks.push(block);
+        }
+    }
+    return blocks;
+}
+
+function convertBuildFile(text, fileName) {
+    let blocks = null;
+
+    if (text.includes("BBH_ENCODED:")) {
+        blocks = parseBBHEncoded(text);
+    } else if (text.trimStart().startsWith("[")) {
+        blocks = parseOldBBH(text);
+    }
+
+    if (!blocks || blocks.length === 0) {
+        return null;
+    }
+
+    const baseName = fileName.replace(/\.Build$/i, "");
+    return {
+        formatVersion: 2,
+        name: baseName,
+        blockCount: blocks.length,
+        exportedBy: "build-converter",
+        blocks: blocks,
+    };
+}
+
+function downloadJSON(obj, fileName) {
+    const json = JSON.stringify(obj);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+document.getElementById("fileInput").addEventListener("change", async function(e) {
+    const outputDiv = document.getElementById("output");
+    outputDiv.innerHTML = "";
+
+    const files = e.target.files;
+    for (const file of files) {
+        const text = await file.text();
+        const p = document.createElement("p");
+        try {
+            const result = convertBuildFile(text, file.name);
+            if (!result) {
+                p.textContent = file.name + " — ERROR: unrecognized format or no blocks found";
+                p.style.color = "red";
+            } else {
+                const outName = file.name.replace(/\.Build$/i, "") + ".json";
+                downloadJSON(result, outName);
+                p.textContent = file.name + " → " + outName + " (" + result.blockCount + " blocks)";
+                p.style.color = "green";
+            }
+        } catch (err) {
+            p.textContent = file.name + " — ERROR: " + err.message;
+            p.style.color = "red";
+        }
+        outputDiv.appendChild(p);
+    }
+});
+</script>
+</body>
+</html>
