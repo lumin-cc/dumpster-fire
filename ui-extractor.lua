@@ -471,6 +471,7 @@ end
 
 function UIExtractor:detectElementType(element)
 	if element:IsA("Frame") then
+		-- Milenium buttons: Frame wrapper containing a TextButton (Y ~30)
 		local directButton = findDirectChild(element, function(child)
 			return child:IsA("TextButton")
 		end)
@@ -478,30 +479,22 @@ function UIExtractor:detectElementType(element)
 			return "Button"
 		end
 
+		-- Milenium dividers: Frame with a thin line Frame child
 		local hasLine = findDirectChild(element, function(child)
 			return child:IsA("Frame") and child.AbsoluteSize.Y <= 2
 		end)
 		if hasLine then
 			return "Divider"
 		end
+
+		return "Unknown"
 	end
 
 	if not element:IsA("TextButton") then
 		return "Unknown"
 	end
 
-	local dropdownButton = findDescendant(element, function(child)
-		return child:IsA("TextButton")
-			and child ~= element
-			and child:FindFirstChildWhichIsA("ImageLabel") ~= nil
-			and child:FindFirstChildWhichIsA("TextLabel") ~= nil
-			and child.AbsoluteSize.Y >= 14
-			and child.AbsoluteSize.Y <= 20
-	end)
-	if dropdownButton then
-		return "Dropdown"
-	end
-
+	-- Check for slider first (TextBox + thin TextButton bar)
 	local textBox = findDescendant(element, function(child)
 		return child:IsA("TextBox")
 	end)
@@ -512,19 +505,38 @@ function UIExtractor:detectElementType(element)
 		return "Slider"
 	end
 
+	-- Check for dropdown (TextButton descendant with ImageLabel indicator + TextLabel)
+	local dropdownButton = findDescendant(element, function(child)
+		return child:IsA("TextButton")
+			and child ~= element
+			and child:FindFirstChildWhichIsA("ImageLabel") ~= nil
+			and child:FindFirstChildWhichIsA("TextLabel") ~= nil
+			and child.AbsoluteSize.Y >= 12
+			and child.AbsoluteSize.Y <= 22
+	end)
+	if dropdownButton then
+		return "Dropdown"
+	end
+
+	-- Textbox (has TextBox but no slider bar)
 	if textBox then
 		return "Textbox"
 	end
 
+	-- Checkbox (ImageLabel tick with non-empty image)
 	local checkboxTick = findDescendant(element, function(child)
 		return child:IsA("ImageLabel") and child.Image ~= ""
+			and child.AbsoluteSize.X <= 18 and child.AbsoluteSize.Y <= 18
 	end)
 	if checkboxTick then
 		return "Checkbox"
 	end
 
+	-- Toggle (12x12 circle Frame)
 	local toggleCircle = findDescendant(element, function(child)
-		return child:IsA("Frame") and child.AbsoluteSize.X == 12 and child.AbsoluteSize.Y == 12
+		return child:IsA("Frame") and child.AbsoluteSize.X >= 10 and child.AbsoluteSize.X <= 14
+			and child.AbsoluteSize.Y >= 10 and child.AbsoluteSize.Y <= 14
+			and child:FindFirstChildOfClass("UICorner") ~= nil
 	end)
 	if toggleCircle then
 		return "Toggle"
@@ -665,6 +677,39 @@ function UIExtractor:extractSection(sectionOutline, side, orderIndex)
 	return sectionInfo
 end
 
+function UIExtractor:findColumnsInPage(pageRoot)
+	-- Milenium nests: .page -> tab_parent -> column Frames -> sections
+	-- tab_parent has a horizontal UIListLayout; columns contain SectionManaged children
+	local columns = {}
+
+	local function hasSectionChildren(frame)
+		for _, child in ipairs(frame:GetChildren()) do
+			if child:IsA("Frame") and child:GetAttribute("SectionManaged") then
+				return true
+			end
+		end
+		return false
+	end
+
+	for _, child in ipairs(getGuiChildren(pageRoot)) do
+		if child:IsA("Frame") then
+			if hasSectionChildren(child) then
+				-- This frame is directly a column (has sections)
+				columns[#columns + 1] = child
+			else
+				-- This is likely tab_parent; look inside for actual columns
+				for _, subChild in ipairs(getGuiChildren(child)) do
+					if subChild:IsA("Frame") and hasSectionChildren(subChild) then
+						columns[#columns + 1] = subChild
+					end
+				end
+			end
+		end
+	end
+
+	return columns
+end
+
 function UIExtractor:extractCurrentPage(mainWindow, pageName, pageOrder)
 	local _, pageRoot = self:findActiveTabHolder(mainWindow)
 	local pageInfo = {
@@ -680,7 +725,7 @@ function UIExtractor:extractCurrentPage(mainWindow, pageName, pageOrder)
 		return pageInfo
 	end
 
-	local columns = getDirectChildrenOfClass(pageRoot, "Frame")
+	local columns = self:findColumnsInPage(pageRoot)
 	for columnIndex, column in ipairs(columns) do
 		local side = columnIndex == 1 and "Left" or columnIndex == 2 and "Right" or ("Column" .. tostring(columnIndex))
 		local sectionOrder = 0
@@ -699,9 +744,27 @@ function UIExtractor:extractLibraryMetadata(mainWindow, sidebarHolder, pageButto
 	local title = findDescendant(mainWindow, function(child)
 		return child:IsA("TextLabel") and tostring(child.Text):find("%.rest") ~= nil
 	end)
+	-- Milenium footer: game name label + "PlaceId  lumin.rest" label with rich text
 	local footerGame = findDescendant(mainWindow, function(child)
-		return child:IsA("TextLabel") and stripRichText(child.Text) == tostring(game.PlaceId)
+		if not child:IsA("TextLabel") then return false end
+		local raw = stripRichText(child.Text)
+		return raw == tostring(game.PlaceId)
+			or raw:find(tostring(game.PlaceId), 1, true) ~= nil
 	end)
+	-- Also try to find the game name label in the footer bar
+	local footerBar = findDescendant(mainWindow, function(child)
+		return child:IsA("Frame") and child.AbsoluteSize.Y <= 30 and child.AbsoluteSize.Y >= 20
+			and child.AnchorPoint == Vector2.new(0, 1)
+	end)
+	local gameName = nil
+	if footerBar then
+		local nameLabel = findDirectChild(footerBar, function(child)
+			return child:IsA("TextLabel") and child.TextXAlignment == Enum.TextXAlignment.Left
+		end)
+		if nameLabel then
+			gameName = stripRichText(nameLabel.Text)
+		end
+	end
 
 	return {
 		libraryDirectory = Library.directory,
@@ -710,6 +773,7 @@ function UIExtractor:extractLibraryMetadata(mainWindow, sidebarHolder, pageButto
 		activePage = self:getActivePageName(pageButtonHolder),
 		windowTitle = title and title.Text or nil,
 		gameFooter = footerGame and footerGame.Text or nil,
+		gameName = gameName,
 		placeId = game.PlaceId,
 		playerCount = #Players:GetPlayers(),
 		totalFlags = (function()
@@ -723,8 +787,14 @@ function UIExtractor:extractLibraryMetadata(mainWindow, sidebarHolder, pageButto
 end
 
 function UIExtractor:extractAll()
-	if not Library or not ScreenGui then
+	if not Library then
 		warn("Milenium library not found. Load the UI before running the extractor.")
+		return nil
+	end
+
+	ScreenGui = Library.items
+	if not ScreenGui then
+		warn("Milenium ScreenGui not found. The UI may not be loaded yet.")
 		return nil
 	end
 
@@ -746,7 +816,16 @@ function UIExtractor:extractAll()
 	local tabs, separators = self:getTabButtons(sidebarHolder)
 
 	self.extractedData.metadata = self:extractLibraryMetadata(mainWindow, sidebarHolder, pageButtonHolder)
-	self.extractedData.flags = serializeValue(Library.flags or {})
+	local serializedFlags = {}
+	for flagName, flagValue in next, Library.flags or {} do
+		local ok, serialized = pcall(serializeValue, flagValue)
+		if ok then
+			serializedFlags[tostring(flagName)] = serialized
+		else
+			serializedFlags[tostring(flagName)] = tostring(flagValue)
+		end
+	end
+	self.extractedData.flags = serializedFlags
 	self.extractedData.structure = {
 		separators = separators,
 		warnings = self.warnings,
@@ -757,6 +836,9 @@ function UIExtractor:extractAll()
 		self:addWarning("firesignal/getconnections not available; only the currently visible tab/page can be fully inspected")
 		self.extractedData.structure.warnings = self.warnings
 	end
+
+	-- Brief wait for UI to settle after any prior navigation
+	task.wait(0.15)
 
 	for _, tab in ipairs(tabs) do
 		local tabInfo = {
@@ -775,6 +857,11 @@ function UIExtractor:extractAll()
 			continue
 		end
 
+		-- Wait for tab content to settle after activation
+		if not tabInfo.active then
+			task.wait(0.2)
+		end
+
 		pageButtonHolder = self:findPageButtonHolder(mainWindow)
 		local pages = self:getPageButtons(pageButtonHolder)
 		if #pages == 0 then
@@ -783,6 +870,9 @@ function UIExtractor:extractAll()
 			for _, page in ipairs(pages) do
 				local pageActive = pageButtonHolder and self:getActivePageName(pageButtonHolder) == page.name
 				local pageActivated = pageActive or self:activatePage(page.button)
+				if not pageActive and pageActivated then
+					task.wait(0.15)
+				end
 				if pageActivated then
 					tabInfo.pages[#tabInfo.pages + 1] = self:extractCurrentPage(mainWindow, page.name, page.order)
 				else
